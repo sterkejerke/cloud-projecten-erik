@@ -1,0 +1,14 @@
+version: '3'
+services:
+  web:
+    image: nginx
+    ports:
+      - "8081:80"
+
+  db:
+    image: mysql:5.7
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: mydb
+      MYSQL_USER: myuser
+      MYSQL_PASSWORD: mypass

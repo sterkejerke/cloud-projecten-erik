@@ -1,0 +1,78 @@
+---
+- name: Create WordPress LXC Container
+  hosts: localhost
+  gather_facts: no
+  vars:
+    ctid: "{{ ctid | default('102') }}"
+    hostname: "{{ hostname | default('wordpress-ansible') }}"
+    ip: "{{ ip | default('192.168.100.12') }}"
+    template: "local:vztmpl/debian-12-turnkey-wordpress_18.2-1_amd64.tar.gz"
+    username: "wpuser{{ ctid }}"
+
+  tasks:
+    - name: Create LXC container
+      command: >
+        pct create {{ ctid }} {{ template }}
+        --hostname {{ hostname }}
+        --cores 1
+        --memory 1024
+        --swap 512
+        --rootfs cephpool:30
+        --net0 name=eth0,bridge=vmbr0,ip={{ ip }}/24,gw=192.168.100.1,rate=50
+        --unprivileged 1
+        --features nesting=1
+
+    - name: Start container
+      command: pct start {{ ctid }}
+
+    - name: Wait for container to boot
+      pause:
+        seconds: 10
+
+    - name: Set DNS
+      command: pct exec {{ ctid }} -- bash -c "echo 'nameserver 1.1.1.1' > /etc/resolv.conf"
+
+    - name: Set default route
+      command: pct exec {{ ctid }} -- bash -c "ip route add default via 192.168.100.1 2>/dev/null || true"
+
+    - name: Update apt
+      command: pct exec {{ ctid }} -- bash -c "apt-get update -y"
+
+    - name: Install UFW
+      command: pct exec {{ ctid }} -- bash -c "apt-get install -y ufw"
+
+    - name: Set UFW default deny incoming
+      command: pct exec {{ ctid }} -- bash -c "ufw default deny incoming"
+
+    - name: Set UFW default allow outgoing
+      command: pct exec {{ ctid }} -- bash -c "ufw default allow outgoing"
+
+    - name: Allow SSH
+      command: pct exec {{ ctid }} -- bash -c "ufw allow 22/tcp"
+
+    - name: Allow HTTP
+      command: pct exec {{ ctid }} -- bash -c "ufw allow 80/tcp"
+
+    - name: Allow HTTPS
+      command: pct exec {{ ctid }} -- bash -c "ufw allow 443/tcp"
+
+    - name: Enable UFW
+      command: pct exec {{ ctid }} -- bash -c "ufw --force enable"
+
+    - name: Create user
+      command: pct exec {{ ctid }} -- bash -c "useradd -m -s /bin/bash {{ username }}"
+
+    - name: Create SSH directory
+      command: pct exec {{ ctid }} -- bash -c "mkdir -p /home/{{ username }}/.ssh"
+
+    - name: Generate SSH key
+      command: pct exec {{ ctid }} -- bash -c "ssh-keygen -t ed25519 -f /home/{{ username }}/.ssh/id_ed25519 -N '' -C '{{ username }}@{{ hostname }}'"
+
+    - name: Set authorized keys
+      command: pct exec {{ ctid }} -- bash -c "cp /home/{{ username }}/.ssh/id_ed25519.pub /home/{{ username }}/.ssh/authorized_keys"
+
+    - name: Set permissions
+      command: pct exec {{ ctid }} -- bash -c "chmod 700 /home/{{ username }}/.ssh && chmod 600 /home/{{ username }}/.ssh/authorized_keys && chown -R {{ username }}:{{ username }} /home/{{ username }}/.ssh"
+
+    - name: Show result
+      command: pct exec {{ ctid }} -- bash -c "echo 'WordPress ready at http://{{ ip }}'"
