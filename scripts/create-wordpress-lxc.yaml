@@ -2,12 +2,16 @@
 - name: Create WordPress LXC Container
   hosts: localhost
   gather_facts: no
+
   vars:
     ctid: "{{ ctid | default('102') }}"
     hostname: "{{ hostname | default('wordpress-ansible') }}"
-    ip: "{{ ip | default('192.168.100.12') }}"
+    ip: "{{ ip | default('10.24.52.102') }}"
+    gateway: "10.24.52.1"
+    bridge: "vmbr1"
     template: "local:vztmpl/debian-12-turnkey-wordpress_18.2-1_amd64.tar.gz"
     username: "wpuser{{ ctid }}"
+    storage: "cephpool"
 
   tasks:
     - name: Create LXC container
@@ -17,62 +21,81 @@
         --cores 1
         --memory 1024
         --swap 512
-        --rootfs cephpool:30
-        --net0 name=eth0,bridge=vmbr0,ip={{ ip }}/24,gw=192.168.100.1,rate=50
-        --unprivileged 1
+        --rootfs {{ storage }}:30
+        --net0 name=eth0,bridge={{ bridge }},ip={{ ip }}/24,gw={{ gateway }},rate=51200,firewall=1
+        --unprivileged 0
         --features nesting=1
+
+    - name: Configure Proxmox firewall (DROP policy, allow 22/80/443)
+      copy:
+        dest: "/etc/pve/firewall/{{ ctid }}.fw"
+        content: |
+          [OPTIONS]
+          enable: 1
+          policy_in: DROP
+          policy_out: ACCEPT
+
+          [RULES]
+          IN ACCEPT -p tcp --dport 22 -log nolog
+          IN ACCEPT -p tcp --dport 80 -log nolog
+          IN ACCEPT -p tcp --dport 443 -log nolog
 
     - name: Start container
       command: pct start {{ ctid }}
 
     - name: Wait for container to boot
       pause:
-        seconds: 10
+        seconds: 15
 
-    - name: Set DNS
-      command: pct exec {{ ctid }} -- bash -c "echo 'nameserver 1.1.1.1' > /etc/resolv.conf"
+    - name: Update apt cache
+      command: pct exec {{ ctid }} -- bash -c "apt-get update -y -q"
 
-    - name: Set default route
-      command: pct exec {{ ctid }} -- bash -c "ip route add default via 192.168.100.1 2>/dev/null || true"
+    - name: Update all packages (via orchestration)
+      command: pct exec {{ ctid }} -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q"
 
-    - name: Update apt
-      command: pct exec {{ ctid }} -- bash -c "apt-get update -y"
-
-    - name: Install UFW
-      command: pct exec {{ ctid }} -- bash -c "apt-get install -y ufw"
-
-    - name: Set UFW default deny incoming
-      command: pct exec {{ ctid }} -- bash -c "ufw default deny incoming"
-
-    - name: Set UFW default allow outgoing
-      command: pct exec {{ ctid }} -- bash -c "ufw default allow outgoing"
-
-    - name: Allow SSH
-      command: pct exec {{ ctid }} -- bash -c "ufw allow 22/tcp"
-
-    - name: Allow HTTP
-      command: pct exec {{ ctid }} -- bash -c "ufw allow 80/tcp"
-
-    - name: Allow HTTPS
-      command: pct exec {{ ctid }} -- bash -c "ufw allow 443/tcp"
-
-    - name: Enable UFW
-      command: pct exec {{ ctid }} -- bash -c "ufw --force enable"
-
-    - name: Create user
+    - name: Create unique SSH user
       command: pct exec {{ ctid }} -- bash -c "useradd -m -s /bin/bash {{ username }}"
 
     - name: Create SSH directory
-      command: pct exec {{ ctid }} -- bash -c "mkdir -p /home/{{ username }}/.ssh"
+      command: pct exec {{ ctid }} -- bash -c "mkdir -p /home/{{ username }}/.ssh && chmod 700 /home/{{ username }}/.ssh"
 
-    - name: Generate SSH key
-      command: pct exec {{ ctid }} -- bash -c "ssh-keygen -t ed25519 -f /home/{{ username }}/.ssh/id_ed25519 -N '' -C '{{ username }}@{{ hostname }}'"
+    - name: Generate unique SSH key for this container
+      command: >
+        ssh-keygen -t ed25519
+        -f /root/.ssh/lxc-keys/id_ed25519_{{ ctid }}
+        -N ""
+        -C "{{ username }}@{{ hostname }}"
+      args:
+        creates: "/root/.ssh/lxc-keys/id_ed25519_{{ ctid }}"
 
-    - name: Set authorized keys
-      command: pct exec {{ ctid }} -- bash -c "cp /home/{{ username }}/.ssh/id_ed25519.pub /home/{{ username }}/.ssh/authorized_keys"
+    - name: Push public key into container
+      command: pct push {{ ctid }} /root/.ssh/lxc-keys/id_ed25519_{{ ctid }}.pub /home/{{ username }}/.ssh/authorized_keys
 
-    - name: Set permissions
-      command: pct exec {{ ctid }} -- bash -c "chmod 700 /home/{{ username }}/.ssh && chmod 600 /home/{{ username }}/.ssh/authorized_keys && chown -R {{ username }}:{{ username }} /home/{{ username }}/.ssh"
+    - name: Set correct SSH permissions
+      command: >
+        pct exec {{ ctid }} -- bash -c
+        "chmod 600 /home/{{ username }}/.ssh/authorized_keys &&
+         chown -R {{ username }}:{{ username }} /home/{{ username }}/.ssh"
+
+    - name: Install Node Exporter for monitoring
+      command: pct push {{ ctid }} /usr/local/bin/node_exporter /usr/local/bin/node_exporter
+      ignore_errors: yes
+
+    - name: Start Node Exporter (auto added to monitoring)
+      command: >
+        pct exec {{ ctid }} -- bash -c
+        "chmod +x /usr/local/bin/node_exporter;
+         nohup /usr/local/bin/node_exporter --web.listen-address=0.0.0.0:9100
+         > /var/log/node_exporter.log 2>&1 &"
+      ignore_errors: yes
 
     - name: Show result
       command: pct exec {{ ctid }} -- bash -c "echo 'WordPress ready at http://{{ ip }}'"
+
+    - name: Show SSH access info
+      debug:
+        msg:
+          - "Container {{ ctid }} aangemaakt!"
+          - "SSH: ssh -i /root/.ssh/lxc-keys/id_ed25519_{{ ctid }} {{ username }}@{{ ip }}"
+          - "WordPress: http://{{ ip }}/wp-admin"
+          - "Monitoring: http://{{ ip }}:9100/metrics"
