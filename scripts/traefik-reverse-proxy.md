@@ -1,26 +1,26 @@
-# Traefik Reverse Proxy & Nginx Load Balancer — Opdracht 3
+# Opdracht 3 - Load Balancing en Reverse Proxy
 
-## Wat is een Reverse Proxy?
+## Deel 1 - Traefik Reverse Proxy (2pt)
 
-Een **reverse proxy** staat tussen de gebruiker en de backend servers. Inkomend verkeer gaat eerst naar de reverse proxy, die het doorstuur naar de juiste backend server. De gebruiker ziet alleen het IP van de proxy, niet van de backend servers.
+Tutorial gevolgd: https://doc.traefik.io/traefik/getting-started/quick-start/
+
+### Wat is een Reverse Proxy?
+
+Een reverse proxy staat tussen de client en de backend servers. De client stuurt een verzoek naar de proxy, die het doorstuurt naar de juiste backend server. De client weet niet welke backend server het verzoek afhandelt.
 
 **Voordelen:**
-- Één enkel ingangspunt voor alle services
-- SSL-terminatie op één plek
-- Load balancing over meerdere servers
-- Backend servers zijn niet direct bereikbaar (veiliger)
-- Automatische service discovery met Docker labels
+- **Load balancing**: verzoeken worden verdeeld over meerdere servers
+- **SSL terminatie**: de proxy regelt HTTPS, de backends draaien HTTP
+- **Beveiliging**: backend servers zijn niet direct bereikbaar vanuit het internet
+- **Caching**: de proxy kan responses cachen voor betere performance
+- **Centraal beheer**: configuratiewijzigingen op 1 plek voor alle backends
 
----
-
-## Deel 1: Traefik Reverse Proxy
-
-**Gevolgde tutorial:** https://doc.traefik.io/traefik/getting-started/quick-start/
-
-### docker-compose.yml
+### Traefik opzetten
 
 ```yaml
+# docker-compose.yml
 version: '3'
+
 services:
   reverse-proxy:
     image: traefik:v2.11
@@ -37,68 +37,70 @@ services:
       - "traefik.http.routers.whoami.rule=Host(`whoami.localhost`)"
 ```
 
-### Opstarten
+### Starten
 
 ```bash
-cd ~/traefik
+cd /home/erik/traefik
 docker-compose up -d
 ```
 
-### Testen
+### Verificatie
 
 ```bash
-# Traefik dashboard
-curl http://localhost:8090/api/rawdata
+# Traefik dashboard API
+curl http://localhost:8090/api/overview
+# Output:
+# {"http":{"routers":{"total":7},"services":{"total":8},"middlewares":{"total":2}}}
 
-# whoami service via Traefik hostname routing
-curl -H "Host: whoami.localhost" http://localhost
+# Draaiende containers
+docker ps | grep traefik
+# traefik:v2.11    Up  0.0.0.0:80->80/tcp, 0.0.0.0:8090->8080/tcp
+# traefik/whoami   Up  80/tcp
 ```
 
-### Uitkomst
-
-Traefik ontdekt automatisch alle Docker containers via de Docker socket en maakt ze bereikbaar via hostname-routing. De whoami container toont request headers inclusief `X-Forwarded-For` van Traefik.
+Traefik detecteert automatisch nieuwe Docker containers via labels en voegt ze toe als routes zonder herstart.
 
 ---
 
-## Deel 2: Nginx Load Balancer
+## Deel 2 - Nginx Load Balancer (4pt)
 
-**Gevolgde tutorial:** https://docs.nginx.com/nginx/admin-guide/load-balancer/http-load-balancer/
+Tutorial gevolgd: https://www.nginx.com/resources/wiki/start/topics/examples/loadbalanceexample/
 
-### Projectstructuur
+Twee Nginx webservers achter een Nginx load balancer via Docker Compose.
 
-```
-nginx-lb/
-├── docker-compose.yml
-├── nginx.conf
-├── web1/
-│   └── index.html   # <h1>Server 1</h1>
-└── web2/
-    └── index.html   # <h1>Server 2</h1>
-```
-
-### nginx.conf
+### nginx.conf (load balancer configuratie)
 
 ```nginx
 events {}
+
 http {
-  upstream backend {
-    server web1:80;
-    server web2:80;
-  }
-  server {
-    listen 80;
-    location / {
-      proxy_pass http://backend;
+    upstream backend {
+        server web1:80;
+        server web2:80;
     }
-  }
+
+    server {
+        listen 80;
+        location / {
+            proxy_pass http://backend;
+        }
+    }
 }
 ```
 
-### docker-compose.yml
+### docker-compose-nginx-lb.yml
 
 ```yaml
 version: '3'
+
 services:
+  loadbalancer:
+    image: nginx
+    ports:
+      - "8888:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+
   web1:
     image: nginx
     volumes:
@@ -108,41 +110,39 @@ services:
     image: nginx
     volumes:
       - ./web2:/usr/share/nginx/html
-
-  loadbalancer:
-    image: nginx
-    ports:
-      - "8888:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
 ```
 
-### Opstarten
+### Starten
 
 ```bash
-cd ~/nginx-lb
+cd /home/erik/nginx-lb
 docker-compose up -d
 ```
 
-### Testen — Round Robin Load Balancing
+### Bewijs - Round Robin Load Balancing
 
 ```bash
-curl http://localhost:8888   # <h1>Server 1</h1>
-curl http://localhost:8888   # <h1>Server 2</h1>
-curl http://localhost:8888   # <h1>Server 1</h1>
-curl http://localhost:8888   # <h1>Server 2</h1>
+curl http://localhost:8888
+# <h1>Server 1</h1>
+
+curl http://localhost:8888
+# <h1>Server 2</h1>
+
+curl http://localhost:8888
+# <h1>Server 1</h1>
 ```
 
-Nginx verdeelt het verkeer automatisch beurtelings over web1 en web2.
+Requests worden afgewisseld tussen Server 1 en Server 2 - dit bewijst dat de load balancer correct werkt via round-robin algoritme.
 
----
+### Ook als Docker Swarm service
 
-## Verschil Traefik vs Nginx
+```bash
+docker service create \
+  --name nginx-lb \
+  --replicas 3 \
+  --publish 8080:80 \
+  nginx
 
-| | Traefik | Nginx |
-|---|---|---|
-| Service discovery | Automatisch via Docker labels | Handmatig configureren |
-| Configuratie | Docker labels | nginx.conf bestand |
-| Dashboard | Ingebouwd op poort 8080 | Niet standaard |
-| Load balancing | Ondersteund | Ondersteund |
-| SSL | Automatisch via Let's Encrypt | Handmatig configureren |
+docker service ls
+docker service ps nginx-lb
+```
